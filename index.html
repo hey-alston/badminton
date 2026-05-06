@@ -24,8 +24,8 @@ const METHOD_STYLE = {
   "\u73FE\u91D1": { bg: "#e8f5e9", color: "#2e7d32", border: "#81c784" },
   "Line Pay": { bg: "#e3f2fd", color: "#0a5c9a", border: "#64b5f6" }
 };
-const PRICE_MAP = { 2: 180, 3: 270, 4: 320 };
-const PRICE_TIERS = [{ hours: 2, price: 180 }, { hours: 3, price: 270 }, { hours: 4, price: 320 }];
+const PRICE_MAP = { 1: 90, 2: 180, 3: 270, 4: 320 };
+const PRICE_TIERS = [{ hours: 1, price: 90 }, { hours: 2, price: 180 }, { hours: 3, price: 270 }, { hours: 4, price: 320 }];
 const STORAGE_KEY = "badminton_tracker_v1";
 function getPrice(h) {
   return PRICE_MAP[h] ?? 0;
@@ -104,7 +104,7 @@ function parseRoster(text) {
       else merged.push({ ...iv });
     }
     const hours = merged.reduce((s, iv) => s + (iv.end - iv.start), 0);
-    return { id: generateId(), name: p.name, hours: Math.max(2, Math.min(4, hours)), startHour: merged[0]?.start ?? null, endHour: merged[merged.length - 1]?.end ?? null, method: "\u672A\u6536" };
+    return { id: generateId(), name: p.name, hours: Math.max(1, Math.min(4, hours)), startHour: merged[0]?.start ?? null, endHour: merged[merged.length - 1]?.end ?? null, method: "\u672A\u6536" };
   });
 }
 function Badge({ label, count, color, bg }) {
