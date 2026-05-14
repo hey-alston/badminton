@@ -51,6 +51,9 @@ function parseNameTime(raw) {
 function cleanName(raw) {
   return raw.replace(/[（(]\d+[~\-～]\d+[)）]/g, "").replace(/^\d+[.、\s]+/, "").trim();
 }
+function normName(n) {
+  return n.replace(/\s+/g, "").toLowerCase();
+}
 function parseRoster(text) {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const sessions = [];
@@ -78,21 +81,23 @@ function parseRoster(text) {
   for (const sess of sessions) {
     const nameSeen = {};
     for (const m of sess.members) {
-      nameSeen[m.cleanedName] = (nameSeen[m.cleanedName] || 0) + 1;
+      const normKey = normName(m.cleanedName);
+      nameSeen[normKey] = (nameSeen[normKey] || 0) + 1;
       allEntries.push({
         sessionId: sess.id,
         sessionStart: sess.start,
         sessionEnd: sess.end,
         sessionDuration: sess.duration,
         cleanedName: m.cleanedName,
+        normKey,
         timeRange: m.timeRange,
-        occurrenceIndex: nameSeen[m.cleanedName]
+        occurrenceIndex: nameSeen[normKey]
       });
     }
   }
   const personMap = {};
   for (const e of allEntries) {
-    const key = `${e.cleanedName}__${e.occurrenceIndex}`;
+    const key = `${e.normKey}__${e.occurrenceIndex}`;
     if (!personMap[key]) personMap[key] = { name: e.cleanedName, sessions: [] };
     personMap[key].sessions.push({
       sessionId: e.sessionId,
@@ -131,11 +136,16 @@ function parseRoster(text) {
     };
   });
 }
+function normalizeName(n) {
+  return n.replace(/\s+/g, "").toLowerCase();
+}
 function mergeMembers(existing, parsed) {
   const result = [...existing];
+  const matched = /* @__PURE__ */ new Set();
   for (const p of parsed) {
-    const idx = result.findIndex((m) => m.name === p.name);
-    if (idx >= 0) {
+    const idx = result.findIndex((m) => normalizeName(m.name) === normalizeName(p.name));
+    if (idx >= 0 && !matched.has(idx)) {
+      matched.add(idx);
       result[idx] = { ...result[idx], hours: p.hours, startHour: p.startHour, endHour: p.endHour };
     } else {
       result.push(p);
