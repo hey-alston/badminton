@@ -173,6 +173,7 @@ function App() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(sessionTitle);
   const [loaded, setLoaded] = useState(false);
+  const [pendingTime, setPendingTime] = useState({});
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -246,7 +247,40 @@ function App() {
       return { ...m, method: PAYMENT_METHODS[(idx + 1) % PAYMENT_METHODS.length] };
     }));
   };
-  const updateHours = (id, hours) => setMembers((prev) => prev.map((m) => m.id !== id ? m : { ...m, hours }));
+  const updateHours = (id, hours) => {
+    const m = members.find((m2) => m2.id === id);
+    setPendingTime((prev) => ({
+      ...prev,
+      [id]: { hours, start: m?.startHour ?? "", end: m?.endHour ?? "" }
+    }));
+  };
+  const confirmTime = (id) => {
+    const p = pendingTime[id];
+    if (!p) return;
+    const s = parseInt(p.start), e = parseInt(p.end);
+    const hasTime = !isNaN(s) && !isNaN(e) && e > s;
+    setMembers((prev) => prev.map((m) => {
+      if (m.id !== id) return m;
+      return {
+        ...m,
+        hours: hasTime ? Math.max(1, Math.min(4, e - s)) : p.hours,
+        startHour: hasTime ? s : m.startHour,
+        endHour: hasTime ? e : m.endHour
+      };
+    }));
+    setPendingTime((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
+  const cancelTime = (id) => {
+    setPendingTime((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  };
   const updateTime = (id, field, val) => {
     setMembers((prev) => prev.map((m) => {
       if (m.id !== id) return m;
@@ -320,7 +354,7 @@ function App() {
     const amount = getPrice(m.hours);
     const ms = METHOD_STYLE[m.method];
     const hasTime = m.startHour != null && m.endHour != null;
-    return /* @__PURE__ */ React.createElement("div", { key: m.id, style: { background: "#fff", border: `1px solid ${m.method !== "\u672A\u6536" ? ms.border : "#eee"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 24, height: 24, borderRadius: "50%", background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#999", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontWeight: 700, fontSize: 15 } }, m.name), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#333" } }, "$", amount), /* @__PURE__ */ React.createElement("button", { onClick: () => cycleMethod(m.id), style: { background: ms.bg, color: ms.color, border: `1.5px solid ${ms.border}`, borderRadius: 20, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit" } }, m.method === "\u672A\u6536" ? "\u672A\u6536 \u2192" : m.method), /* @__PURE__ */ React.createElement("button", { onClick: () => removeMember(m.id), style: { background: "none", border: "none", color: "#ccc", fontSize: 18, cursor: "pointer", padding: "0", lineHeight: 1 } }, "\xD7")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, PRICE_TIERS.map((t) => /* @__PURE__ */ React.createElement("button", { key: t.hours, onClick: () => updateHours(m.id, t.hours), style: { flex: 1, padding: "3px 0", borderRadius: 16, fontSize: 11, fontWeight: 700, border: m.hours === t.hours ? "1.5px solid #1a1a1a" : "1.5px solid #ddd", background: m.hours === t.hours ? "#1a1a1a" : "#f5f5f5", color: m.hours === t.hours ? "#fff" : "#aaa", cursor: "pointer", fontFamily: "inherit" } }, t.hours, "hr")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4, marginLeft: 4 } }, /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { key: m.id, style: { background: "#fff", border: `1px solid ${m.method !== "\u672A\u6536" ? ms.border : "#eee"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 24, height: 24, borderRadius: "50%", background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#999", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontWeight: 700, fontSize: 15 } }, m.name), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#333" } }, "$", amount), /* @__PURE__ */ React.createElement("button", { onClick: () => cycleMethod(m.id), style: { background: ms.bg, color: ms.color, border: `1.5px solid ${ms.border}`, borderRadius: 20, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit" } }, m.method === "\u672A\u6536" ? "\u672A\u6536 \u2192" : m.method), /* @__PURE__ */ React.createElement("button", { onClick: () => removeMember(m.id), style: { background: "none", border: "none", color: "#ccc", fontSize: 18, cursor: "pointer", padding: "0", lineHeight: 1 } }, "\xD7")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, PRICE_TIERS.map((t) => /* @__PURE__ */ React.createElement("button", { key: t.hours, onClick: () => updateHours(m.id, t.hours), style: { flex: 1, padding: "3px 0", borderRadius: 16, fontSize: 11, fontWeight: 700, border: m.hours === t.hours && !pendingTime[m.id] ? "1.5px solid #1a1a1a" : "1.5px solid #ddd", background: m.hours === t.hours && !pendingTime[m.id] ? "#1a1a1a" : "#f5f5f5", color: m.hours === t.hours && !pendingTime[m.id] ? "#fff" : "#aaa", cursor: "pointer", fontFamily: "inherit" } }, t.hours, "hr")), !pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4, marginLeft: 4 } }, /* @__PURE__ */ React.createElement(
       "input",
       {
         type: "number",
@@ -338,7 +372,25 @@ function App() {
         placeholder: "\u7D50\u675F",
         style: { width: 46, fontSize: 11, textAlign: "center", border: "1px solid #ddd", borderRadius: 6, padding: "3px 2px", outline: "none", fontFamily: "inherit" }
       }
-    ))));
+    ))), pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10, background: "#f7f6f3", borderRadius: 10, padding: "12px", border: "1.5px solid #e0e0e0" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#555", marginBottom: 8, fontWeight: 700 } }, "\u6539\u70BA ", pendingTime[m.id].hours, "hr\uFF0C\u8ACB\u78BA\u8A8D\u5728\u5834\u6642\u9593\uFF1A"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } }, /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "number",
+        placeholder: "\u958B\u59CB",
+        value: pendingTime[m.id].start,
+        onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], start: e.target.value } })),
+        style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" }
+      }
+    ), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "number",
+        placeholder: "\u7D50\u675F",
+        value: pendingTime[m.id].end,
+        onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], end: e.target.value } })),
+        style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" }
+      }
+    ), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => cancelTime(m.id), style: { flex: 1, padding: "8px 0", background: "#fff", color: "#888", border: "1.5px solid #ddd", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u53D6\u6D88"), /* @__PURE__ */ React.createElement("button", { onClick: () => confirmTime(m.id), style: { flex: 2, padding: "8px 0", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u78BA\u8A8D"))));
   })), members.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "#1a1a1a", borderRadius: 12, padding: "16px 20px", color: "#fff" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#555", marginBottom: 10, letterSpacing: 2 } }, "\u672C\u5834\u5C0F\u7D50"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa", fontSize: 14 } }, "\u5171 ", members.length, " \u4EBA"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, "\u61C9\u6536 $", stats.total)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } }, stats.priceBreakdown.map((p) => /* @__PURE__ */ React.createElement("div", { key: p.hours, style: { background: "#2a2a2a", borderRadius: 8, padding: "5px 10px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#f0c040", fontWeight: 700 } }, "$", p.price), /* @__PURE__ */ React.createElement("span", { style: { color: "#666", margin: "0 3px" } }, "\xD7"), /* @__PURE__ */ React.createElement("span", { style: { color: "#fff", fontWeight: 700 } }, p.count, " \u4EBA")))), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid #2a2a2a", marginBottom: 8 } }), stats.cashCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontSize: 14 } }, "\u{1F4B5} \u73FE\u91D1\uFF08", stats.cashCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontWeight: 700 } }, "$", stats.cashTotal)), stats.lineCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#64b5f6", fontSize: 14 } }, "\u{1F4F1} Line Pay\uFF08", stats.lineCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#64b5f6", fontWeight: 700 } }, "$", stats.lineTotal)), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid #2a2a2a", marginTop: 4, paddingTop: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontSize: 14 } }, "\u2713 \u5DF2\u6536\u5408\u8A08"), /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontWeight: 700 } }, "$", stats.collected)), stats.pending > 0 ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#ef9a9a", fontSize: 14 } }, "\u23F3 \u5F85\u6536\uFF08", stats.unpaidCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#ef9a9a", fontWeight: 700 } }, "$", stats.pending)) : /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#81c784", fontWeight: 700 } }, "\u2705 \u5168\u90E8\u6536\u6B3E\u5B8C\u6210\uFF01"))), stats.hourStats.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "#fff", borderRadius: 12, padding: "16px 20px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#aaa", marginBottom: 12, letterSpacing: 2 } }, "\u6BCF\u5C0F\u6642\u5728\u5834\u4EBA\u6578"), stats.hourStats.map(({ hour, count }) => {
     const maxC = Math.max(...stats.hourStats.map((h) => h.count));
     return /* @__PURE__ */ React.createElement("div", { key: hour, style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: "#555", fontWeight: 700 } }, hour, ":00 \u2013 ", hour + 1, ":00"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "#1a1a1a" } }, count, " \u4EBA")), /* @__PURE__ */ React.createElement("div", { style: { background: "#f0f0f0", borderRadius: 4, height: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: `${Math.round(count / maxC * 100)}%`, height: "100%", background: "#1a1a1a", borderRadius: 4 } })));
