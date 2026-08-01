@@ -24,56 +24,135 @@ const METHOD_STYLE = {
   "\u73FE\u91D1": { bg: "#e8f5e9", color: "#2e7d32", border: "#81c784" },
   "Line Pay": { bg: "#e3f2fd", color: "#0a5c9a", border: "#64b5f6" }
 };
-const PRICE_MAP = { 1: 90, 2: 180, 3: 270, 4: 320 };
-const PRICE_TIERS = [{ hours: 1, price: 90 }, { hours: 2, price: 180 }, { hours: 3, price: 270 }, { hours: 4, price: 320 }];
-const STORAGE_KEY = "badminton_tracker_v1";
-function getPrice(h) {
-  return PRICE_MAP[h] ?? 0;
-}
+const WEEKDAYS = ["\u9031\u4E00", "\u9031\u4E8C", "\u9031\u4E09", "\u9031\u56DB", "\u9031\u4E94", "\u9031\u516D", "\u9031\u65E5"];
+const STORAGE_KEY = "badminton_tracker_v4";
+const WEEKLY_KEY = "badminton_weekly_v2";
+const ADDON_1HR = 100;
+const ADDON_3RD = 90;
 function generateId() {
   return Math.random().toString(36).slice(2, 9);
 }
+function normName(n) {
+  return n.replace(/\s+/g, "").toLowerCase();
+}
+function defaultSlot() {
+  return { id: generateId(), name: "", start: "", end: "", fee: "" };
+}
+function defaultWeekly() {
+  return WEEKDAYS.reduce((acc, day) => ({ ...acc, [day]: [] }), {});
+}
+function defaultSession() {
+  const now = /* @__PURE__ */ new Date();
+  return { title: `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} \u5834\u6B21`, slots: [] };
+}
+function calcPrice(member, slots) {
+  const { hours, startHour, endHour, sessionIds } = member;
+  if (!hours) return { price: 0, warning: false };
+  const validSlots = slots.filter((s) => s.start !== "" && s.end !== "" && s.fee !== "");
+  if (!validSlots.length) return { price: 0, warning: true };
+  function overlapHours(slot) {
+    if (startHour == null || endHour == null) return 0;
+    return Math.max(0, Math.min(endHour, slot.end) - Math.max(startHour, slot.start));
+  }
+  function slotMatchesSessions(slot) {
+    if (!sessionIds) return false;
+    return sessionIds.some((sid) => {
+      const p = sid.split("_");
+      const sStart = parseInt(p[p.length - 2]);
+      const sEnd = parseInt(p[p.length - 1]);
+      return slot.start === sStart && slot.end === sEnd;
+    });
+  }
+  function findBySession() {
+    return validSlots.filter((s) => slotMatchesSessions(s));
+  }
+  if (hours === 1) return { price: ADDON_1HR, warning: false };
+  function findMainSlots() {
+    if (startHour != null && endHour != null) {
+      let maxOv = 0, best = [];
+      for (const s of validSlots) {
+        const ov = overlapHours(s);
+        if (ov > maxOv) {
+          maxOv = ov;
+          best = [s];
+        } else if (ov === maxOv && ov > 0) best.push(s);
+      }
+      return best.length ? best : [validSlots[0]];
+    }
+    const bySession = findBySession();
+    return bySession.length ? bySession : [validSlots[0]];
+  }
+  if (hours === 2) {
+    const main = findMainSlots();
+    return { price: parseInt(main[0].fee) || 0, warning: main.length > 1 };
+  }
+  if (hours === 3) {
+    const main = findMainSlots();
+    return { price: (parseInt(main[0].fee) || 0) + ADDON_3RD, warning: main.length > 1 };
+  }
+  if (hours === 4) {
+    const fullSlots = validSlots.filter((s) => s.end - s.start >= 2);
+    let twoSlots = [];
+    if (startHour != null && endHour != null) {
+      const allOv = fullSlots.filter((s) => overlapHours(s) > 0);
+      if (allOv.length > 2) return { price: 0, warning: true };
+      twoSlots = allOv.sort((a, b) => overlapHours(b) - overlapHours(a)).slice(0, 2);
+    } else {
+      const bySession = fullSlots.filter((s) => slotMatchesSessions(s));
+      if (bySession.length > 2) return { price: 0, warning: true };
+      twoSlots = bySession.slice(0, 2);
+    }
+    if (twoSlots.length < 2) return { price: twoSlots.length ? (parseInt(twoSlots[0].fee) || 0) * 2 : 0, warning: true };
+    return { price: twoSlots.reduce((s, sl) => s + (parseInt(sl.fee) || 0), 0), warning: false };
+  }
+  return { price: 0, warning: false };
+}
 function parseSessionHeader(line) {
-  const idMatch = line.match(/時段[（(]?([A-Z])[)）]?/);
+  const idMatch = line.match(/時段[（(]?([A-Z][A-Z0-9+]*)[)）]?/);
   const timeMatch = line.match(/[（(](\d+)[~\-～](\d+)[)）]/);
   if (idMatch && timeMatch) {
-    const start = parseInt(timeMatch[1]);
-    const end = parseInt(timeMatch[2]);
-    return { id: `${idMatch[1]}_${start}_${end}`, label: idMatch[1], start, end };
+    const start = parseInt(timeMatch[1]), end = parseInt(timeMatch[2]);
+    const label = idMatch[1];
+    return { id: `${label}_${start}_${end}`, label, start, end, duration: end - start };
   }
   return null;
 }
 function parseNameTime(raw) {
   const m = raw.match(/[（(](\d+)[~\-～](\d+)[)）]/);
-  if (m) return { start: parseInt(m[1]), end: parseInt(m[2]) };
-  return null;
+  return m ? { start: parseInt(m[1]), end: parseInt(m[2]) } : null;
 }
-function cleanName(raw) {
-  return raw.replace(/[（(]\d+[~\-～]\d+[)）]/g, "").replace(/^\d+[.、\s]+/, "").trim();
-}
-function normName(n) {
-  return n.replace(/\s+/g, "").toLowerCase();
+function splitMultiPerson(raw) {
+  const results = [];
+  const re = /([^（(]+)[（(](\d+)[~\-～](\d+)[)）]/g;
+  let match;
+  while ((match = re.exec(raw)) !== null) {
+    const name = match[1].replace(/^\d+[.、\s]+/, "").trim();
+    if (name) results.push({ cleanedName: name, timeRange: { start: parseInt(match[2]), end: parseInt(match[3]) } });
+  }
+  if (!results.length) {
+    const name = raw.replace(/[（(]\d+[~\-～]\d+[)）]/g, "").replace(/^\d+[.、\s]+/, "").trim();
+    if (name) results.push({ cleanedName: name, timeRange: null });
+  }
+  return results;
 }
 function parseRoster(text) {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   const sessions = [];
-  let currentSession = null;
+  let cur = null;
   for (const line of lines) {
     const header = parseSessionHeader(line);
     if (header) {
-      currentSession = { ...header, duration: header.end - header.start, members: [] };
-      sessions.push(currentSession);
+      cur = { ...header, members: [] };
+      sessions.push(cur);
       continue;
     }
     if (line.includes("\u5F8C\u88DC")) continue;
-    if (!currentSession) continue;
+    if (!cur) continue;
     const mm = line.match(/^\d+[.、\s]+(.*)/);
     if (mm) {
       const raw = mm[1].trim();
       if (!raw || /^[.。\-_]+$/.test(raw)) continue;
-      const cleaned = cleanName(raw);
-      if (!cleaned) continue;
-      currentSession.members.push({ cleanedName: cleaned, timeRange: parseNameTime(raw) });
+      for (const p of splitMultiPerson(raw)) if (p.cleanedName) cur.members.push(p);
     }
   }
   if (!sessions.length) return [];
@@ -81,75 +160,49 @@ function parseRoster(text) {
   for (const sess of sessions) {
     const nameSeen = {};
     for (const m of sess.members) {
-      const normKey = normName(m.cleanedName);
-      nameSeen[normKey] = (nameSeen[normKey] || 0) + 1;
-      allEntries.push({
-        sessionId: sess.id,
-        sessionStart: sess.start,
-        sessionEnd: sess.end,
-        sessionDuration: sess.duration,
-        cleanedName: m.cleanedName,
-        normKey,
-        timeRange: m.timeRange,
-        occurrenceIndex: nameSeen[normKey]
-      });
+      const nk = normName(m.cleanedName);
+      nameSeen[nk] = (nameSeen[nk] || 0) + 1;
+      allEntries.push({ sessionId: sess.id, sessionStart: sess.start, sessionEnd: sess.end, sessionDuration: sess.duration, cleanedName: m.cleanedName, normKey: nk, timeRange: m.timeRange, occurrenceIndex: nameSeen[nk] });
     }
   }
   const personMap = {};
   for (const e of allEntries) {
     const key = `${e.normKey}__${e.occurrenceIndex}`;
     if (!personMap[key]) personMap[key] = { name: e.cleanedName, sessions: [] };
-    personMap[key].sessions.push({
-      sessionId: e.sessionId,
-      sessionStart: e.sessionStart,
-      sessionEnd: e.sessionEnd,
-      sessionDuration: e.sessionDuration,
-      timeRange: e.timeRange
-    });
+    personMap[key].sessions.push({ sessionId: e.sessionId, sessionStart: e.sessionStart, sessionEnd: e.sessionEnd, sessionDuration: e.sessionDuration, timeRange: e.timeRange });
   }
   return Object.values(personMap).map((p) => {
     const intervals = [];
-    for (const sess of p.sessions) {
-      if (sess.timeRange) {
-        intervals.push({ start: sess.timeRange.start, end: sess.timeRange.end });
-      } else {
-        intervals.push({ start: sess.sessionStart, end: sess.sessionEnd });
-      }
-    }
+    for (const sess of p.sessions)
+      intervals.push(sess.timeRange ? { start: sess.timeRange.start, end: sess.timeRange.end } : { start: sess.sessionStart, end: sess.sessionEnd });
     intervals.sort((a, b) => a.start - b.start);
     const merged = [];
     for (const iv of intervals) {
-      if (merged.length && iv.start <= merged[merged.length - 1].end)
-        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, iv.end);
+      if (merged.length && iv.start < merged[merged.length - 1].end) merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, iv.end);
       else merged.push({ ...iv });
     }
     const totalHours = merged.reduce((s, iv) => s + (iv.end - iv.start), 0);
-    const startHour = merged[0]?.start ?? null;
-    const endHour = merged[merged.length - 1]?.end ?? null;
-    return {
-      id: generateId(),
-      name: p.name,
-      hours: Math.max(1, Math.min(4, totalHours)),
-      startHour,
-      endHour,
-      method: "\u672A\u6536"
-    };
+    const sessionIds = [...new Set(p.sessions.map((s) => s.sessionId))];
+    const rawIntervals = p.sessions.map((s) => s.timeRange ? { start: s.timeRange.start, end: s.timeRange.end } : { start: s.sessionStart, end: s.sessionEnd }).sort((a, b) => a.start - b.start);
+    let hasOverlap = false;
+    for (let i = 1; i < rawIntervals.length; i++) {
+      if (rawIntervals[i].start < rawIntervals[i - 1].end) {
+        hasOverlap = true;
+        break;
+      }
+    }
+    return { id: generateId(), name: p.name, hours: Math.max(1, Math.min(4, totalHours)), startHour: merged[0]?.start ?? null, endHour: merged[merged.length - 1]?.end ?? null, mergedIntervals: [...merged], method: "\u672A\u6536", manualPrice: hasOverlap ? -1 : null, sessionIds };
   });
-}
-function normalizeName(n) {
-  return n.replace(/\s+/g, "").toLowerCase();
 }
 function mergeMembers(existing, parsed) {
   const result = [...existing];
   const matched = /* @__PURE__ */ new Set();
   for (const p of parsed) {
-    const idx = result.findIndex((m) => normalizeName(m.name) === normalizeName(p.name));
-    if (idx >= 0 && !matched.has(idx)) {
+    const idx = result.findIndex((m, i) => normName(m.name) === normName(p.name) && !matched.has(i));
+    if (idx >= 0) {
       matched.add(idx);
-      result[idx] = { ...result[idx], hours: p.hours, startHour: p.startHour, endHour: p.endHour };
-    } else {
-      result.push(p);
-    }
+      result[idx] = { ...result[idx], hours: p.hours, startHour: p.startHour, endHour: p.endHour, mergedIntervals: p.mergedIntervals, manualPrice: p.manualPrice, sessionIds: p.sessionIds };
+    } else result.push(p);
   }
   return result;
 }
@@ -157,35 +210,45 @@ function Badge({ label, count, color, bg }) {
   if (!count) return null;
   return /* @__PURE__ */ React.createElement("div", { style: { background: bg, color, borderRadius: 20, padding: "4px 12px", fontSize: 12, fontWeight: 700 } }, label, " ", count, " \u4EBA");
 }
+function SlotCard({ slot, idx, onUpdate, onRemove }) {
+  const tS = { fontSize: 13, border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit", background: "#fff", textAlign: "center" };
+  return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: 12, padding: 14, marginBottom: 8, border: "1px solid #eee" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "#333" } }, "\u6642\u6BB5 ", idx + 1), /* @__PURE__ */ React.createElement("button", { onClick: onRemove, style: { background: "none", border: "none", color: "#ccc", fontSize: 18, cursor: "pointer" } }, "\xD7")), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 8 } }, /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      placeholder: "\u6642\u6BB5\u540D\u7A31\uFF08\u5982 D1\u3001C+D\uFF09",
+      value: slot.name || "",
+      onChange: (e) => onUpdate("name", e.target.value),
+      style: { ...tS, width: "100%", textAlign: "left", padding: "8px 10px", fontSize: 13 }
+    }
+  )), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center" } }, /* @__PURE__ */ React.createElement("input", { type: "number", min: "0", max: "24", placeholder: "\u958B\u59CB", value: slot.start, onChange: (e) => onUpdate("start", e.target.value), style: { ...tS, width: 56 } }), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement("input", { type: "number", min: "0", max: "24", placeholder: "\u7D50\u675F", value: slot.end, onChange: (e) => onUpdate("end", e.target.value), style: { ...tS, width: 56 } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa", marginLeft: 4 } }, "$"), /* @__PURE__ */ React.createElement("input", { type: "number", placeholder: "190", value: slot.fee, onChange: (e) => onUpdate("fee", e.target.value), style: { ...tS, width: 72 } })));
+}
 function App() {
-  const [view, setView] = useState("import");
+  const [view, setView] = useState("basic");
+  const [weekly, setWeekly] = useState(defaultWeekly);
+  const [session, setSession] = useState(defaultSession);
   const [rawText, setRawText] = useState("");
   const [parseError, setParseError] = useState("");
   const [members, setMembers] = useState([]);
   const [nameInput, setNameInput] = useState("");
-  const [selectedHours, setSelectedHours] = useState(2);
   const [manualStart, setManualStart] = useState("");
   const [manualEnd, setManualEnd] = useState("");
-  const [sessionTitle, setSessionTitle] = useState(() => {
-    const n = /* @__PURE__ */ new Date();
-    return `${n.getFullYear()}/${n.getMonth() + 1}/${n.getDate()} \u5834\u6B21`;
-  });
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleInput, setTitleInput] = useState(sessionTitle);
-  const [loaded, setLoaded] = useState(false);
+  const [selectedHours, setSelectedHours] = useState(2);
+  const [manualPrice, setManualPrice] = useState("");
   const [pendingTime, setPendingTime] = useState({});
+  const [activeWeekday, setActiveWeekday] = useState("\u9031\u4E00");
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const data = JSON.parse(saved);
+      const w = localStorage.getItem(WEEKLY_KEY);
+      if (w) setWeekly(JSON.parse(w));
+      const s = localStorage.getItem(STORAGE_KEY);
+      if (s) {
+        const data = JSON.parse(s);
+        if (data.session) setSession(data.session);
         if (data.members) setMembers(data.members);
-        if (data.sessionTitle) {
-          setSessionTitle(data.sessionTitle);
-          setTitleInput(data.sessionTitle);
-        }
         if (data.rawText) setRawText(data.rawText);
         if (data.members?.length > 0) setView("list");
+        else if (data.session?.slots?.length > 0) setView("import");
       }
     } catch (e) {
     }
@@ -194,17 +257,33 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ members, sessionTitle, rawText }));
+      localStorage.setItem(WEEKLY_KEY, JSON.stringify(weekly));
     } catch (e) {
     }
-  }, [members, sessionTitle, rawText, loaded]);
+  }, [weekly, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ session, members, rawText }));
+    } catch (e) {
+    }
+  }, [session, members, rawText, loaded]);
   useEffect(() => {
     const s = parseInt(manualStart), e = parseInt(manualEnd);
-    if (!isNaN(s) && !isNaN(e) && e > s) {
-      const h = Math.max(1, Math.min(4, e - s));
-      setSelectedHours(h);
-    }
+    if (!isNaN(s) && !isNaN(e) && e > s) setSelectedHours(Math.max(1, Math.min(4, e - s)));
   }, [manualStart, manualEnd]);
+  const weeklySlots = weekly[activeWeekday] || [];
+  const addWeeklySlot = () => setWeekly((prev) => ({ ...prev, [activeWeekday]: [...prev[activeWeekday] || [], defaultSlot()] }));
+  const removeWeeklySlot = (id) => setWeekly((prev) => ({ ...prev, [activeWeekday]: prev[activeWeekday].filter((s) => s.id !== id) }));
+  const updateWeeklySlot = (id, field, val) => setWeekly((prev) => ({ ...prev, [activeWeekday]: prev[activeWeekday].map((s) => s.id !== id ? s : { ...s, [field]: val }) }));
+  const addSessionSlot = () => setSession((prev) => ({ ...prev, slots: [...prev.slots, defaultSlot()] }));
+  const removeSessionSlot = (id) => setSession((prev) => ({ ...prev, slots: prev.slots.filter((s) => s.id !== id) }));
+  const updateSessionSlot = (id, field, val) => setSession((prev) => ({ ...prev, slots: prev.slots.map((s) => s.id !== id ? s : { ...s, [field]: val }) }));
+  const applyWeekday = (day) => {
+    const slots2 = (weekly[day] || []).map((s) => ({ ...s, id: generateId() }));
+    const now = /* @__PURE__ */ new Date();
+    setSession({ title: `${now.getFullYear()}/${now.getMonth() + 1}/${now.getDate()} ${day}\u5834\u6B21`, slots: slots2 });
+  };
   const handleImport = () => {
     if (!rawText.trim()) {
       setParseError("\u8ACB\u8CBC\u4E0A\u540D\u55AE\u5167\u5BB9");
@@ -222,12 +301,17 @@ function App() {
   const addMember = () => {
     const name = nameInput.trim();
     if (!name) return;
+    if (manualPrice.trim() === "") {
+      alert("\u8ACB\u586B\u5165\u91D1\u984D");
+      return;
+    }
     const s = parseInt(manualStart), e = parseInt(manualEnd);
     const hasTime = !isNaN(s) && !isNaN(e) && e > s;
     const hours = hasTime ? Math.max(1, Math.min(4, e - s)) : selectedHours;
+    const mp = manualPrice.trim() !== "" ? parseInt(manualPrice) : null;
     setMembers((prev) => {
-      const idx = prev.findIndex((m) => m.name === name);
-      const entry = { id: idx >= 0 ? prev[idx].id : generateId(), name, hours, startHour: hasTime ? s : null, endHour: hasTime ? e : null, method: idx >= 0 ? prev[idx].method : "\u672A\u6536" };
+      const idx = prev.findIndex((m) => normName(m.name) === normName(name));
+      const entry = { id: idx >= 0 ? prev[idx].id : generateId(), name, hours, startHour: hasTime ? s : null, endHour: hasTime ? e : null, method: idx >= 0 ? prev[idx].method : "\u672A\u6536", manualPrice: !isNaN(mp) && mp !== null ? mp : null, sessionIds: null };
       if (idx >= 0) {
         const next = [...prev];
         next[idx] = entry;
@@ -238,56 +322,39 @@ function App() {
     setNameInput("");
     setManualStart("");
     setManualEnd("");
+    setManualPrice("");
   };
   const removeMember = (id) => setMembers((prev) => prev.filter((m) => m.id !== id));
-  const cycleMethod = (id) => {
-    setMembers((prev) => prev.map((m) => {
-      if (m.id !== id) return m;
-      const idx = PAYMENT_METHODS.indexOf(m.method);
-      return { ...m, method: PAYMENT_METHODS[(idx + 1) % PAYMENT_METHODS.length] };
-    }));
-  };
+  const cycleMethod = (id) => setMembers((prev) => prev.map((m) => {
+    if (m.id !== id) return m;
+    const idx = PAYMENT_METHODS.indexOf(m.method);
+    return { ...m, method: PAYMENT_METHODS[(idx + 1) % PAYMENT_METHODS.length] };
+  }));
   const updateHours = (id, hours) => {
     const m = members.find((m2) => m2.id === id);
-    setPendingTime((prev) => ({
-      ...prev,
-      [id]: { hours, start: m?.startHour ?? "", end: m?.endHour ?? "" }
-    }));
+    setPendingTime((prev) => ({ ...prev, [id]: { hours, start: m?.startHour ?? "", end: m?.endHour ?? "" } }));
   };
   const confirmTime = (id) => {
     const p = pendingTime[id];
     if (!p) return;
-    const s = parseInt(p.start), e = parseInt(p.end);
-    const hasTime = !isNaN(s) && !isNaN(e) && e > s;
-    setMembers((prev) => prev.map((m) => {
-      if (m.id !== id) return m;
-      return {
-        ...m,
-        hours: hasTime ? Math.max(1, Math.min(4, e - s)) : p.hours,
-        startHour: hasTime ? s : m.startHour,
-        endHour: hasTime ? e : m.endHour
-      };
-    }));
+    const s = parseInt(p.start), e = parseInt(p.end), hasTime = !isNaN(s) && !isNaN(e) && e > s;
+    setMembers((prev) => prev.map((m) => m.id !== id ? m : { ...m, hours: hasTime ? Math.max(1, Math.min(4, e - s)) : p.hours, startHour: hasTime ? s : m.startHour, endHour: hasTime ? e : m.endHour, manualPrice: null }));
     setPendingTime((prev) => {
       const next = { ...prev };
       delete next[id];
       return next;
     });
   };
-  const cancelTime = (id) => {
-    setPendingTime((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-  };
+  const cancelTime = (id) => setPendingTime((prev) => {
+    const next = { ...prev };
+    delete next[id];
+    return next;
+  });
   const updateTime = (id, field, val) => {
     setMembers((prev) => prev.map((m) => {
       if (m.id !== id) return m;
       const next = { ...m, [field]: val === "" ? null : parseInt(val) };
-      if (next.startHour != null && next.endHour != null && next.endHour > next.startHour) {
-        next.hours = Math.max(1, Math.min(4, next.endHour - next.startHour));
-      }
+      if (next.startHour != null && next.endHour != null && next.endHour > next.startHour) next.hours = Math.max(1, Math.min(4, next.endHour - next.startHour));
       return next;
     }));
   };
@@ -295,105 +362,68 @@ function App() {
     if (!window.confirm("\u78BA\u5B9A\u8981\u6E05\u7A7A\u672C\u5834\u8CC7\u6599\u55CE\uFF1F")) return;
     setMembers([]);
     setRawText("");
-    setView("import");
-    const n = /* @__PURE__ */ new Date();
-    const t = `${n.getFullYear()}/${n.getMonth() + 1}/${n.getDate()} \u5834\u6B21`;
-    setSessionTitle(t);
-    setTitleInput(t);
+    setSession(defaultSession());
+    setView("basic");
+  };
+  const slots = session.slots.map((s) => ({ ...s, start: parseInt(s.start) || 0, end: parseInt(s.end) || 0, fee: parseInt(s.fee) || 0 }));
+  const getMemberPrice = (m) => {
+    if (m.manualPrice === -1) return { price: 0, warning: true };
+    if (m.manualPrice != null) return { price: m.manualPrice, warning: false };
+    return calcPrice(m, slots);
   };
   const stats = useMemo(() => {
-    const total = members.reduce((s, m) => s + getPrice(m.hours), 0);
-    const cashMembers = members.filter((m) => m.method === "\u73FE\u91D1");
-    const lineMembers = members.filter((m) => m.method === "Line Pay");
-    const collected = [...cashMembers, ...lineMembers].reduce((s, m) => s + getPrice(m.hours), 0);
-    const cashTotal = cashMembers.reduce((s, m) => s + getPrice(m.hours), 0);
-    const lineTotal = lineMembers.reduce((s, m) => s + getPrice(m.hours), 0);
+    const priced = members.map((m) => ({ ...m, ...getMemberPrice(m) }));
+    const total = priced.reduce((s, m) => s + m.price, 0);
+    const cashM = priced.filter((m) => m.method === "\u73FE\u91D1");
+    const lineM = priced.filter((m) => m.method === "Line Pay");
+    const collected = [...cashM, ...lineM].reduce((s, m) => s + m.price, 0);
     const pending = total - collected;
-    const unpaidCount = members.filter((m) => m.method === "\u672A\u6536").length;
+    const priceGroups = {};
+    for (const m of priced) priceGroups[m.price] = (priceGroups[m.price] || 0) + 1;
+    const priceBreakdown = Object.entries(priceGroups).map(([p, c]) => ({ price: parseInt(p), count: c })).sort((a, b) => a.price - b.price);
     const hourMap = {};
     for (const m of members) {
-      if (m.startHour == null || m.endHour == null) continue;
-      for (let h = m.startHour; h < m.endHour; h++) hourMap[h] = (hourMap[h] || 0) + 1;
+      const intervals = m.mergedIntervals || (m.startHour != null && m.endHour != null ? [{ start: m.startHour, end: m.endHour }] : []);
+      for (const iv of intervals) {
+        for (let h = iv.start; h < iv.end; h++) hourMap[h] = (hourMap[h] || 0) + 1;
+      }
     }
     const hourStats = Object.entries(hourMap).map(([h, c]) => ({ hour: parseInt(h), count: c })).sort((a, b) => a.hour - b.hour);
-    const priceBreakdown = PRICE_TIERS.map((t) => ({ hours: t.hours, price: t.price, count: members.filter((m) => m.hours === t.hours).length })).filter((p) => p.count > 0);
-    return { total, collected, pending, cashCount: cashMembers.length, lineCount: lineMembers.length, unpaidCount, cashTotal, lineTotal, hourStats, priceBreakdown };
-  }, [members]);
+    return { total, collected, pending, cashCount: cashM.length, lineCount: lineM.length, unpaidCount: priced.filter((m) => m.method === "\u672A\u6536").length, cashTotal: cashM.reduce((s, m) => s + m.price, 0), lineTotal: lineM.reduce((s, m) => s + m.price, 0), warningCount: priced.filter((m) => m.warning).length, priceBreakdown, hourStats };
+  }, [members, session]);
   const iS = { fontSize: 14, border: "1px solid #ddd", borderRadius: 8, padding: "10px 12px", outline: "none", fontFamily: "inherit", background: "#fff" };
-  const timeInputS = { ...iS, width: 64, textAlign: "center", padding: "10px 6px" };
-  return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: "#f7f6f3", paddingBottom: 60 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#1a1a1a", color: "#fff", padding: "24px 20px 16px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, letterSpacing: 3, color: "#666", marginBottom: 6 } }, "\u7FBD\u7403\u6536\u5E33\u672C"), editingTitle ? /* @__PURE__ */ React.createElement(
-    "input",
-    {
-      autoFocus: true,
-      value: titleInput,
-      onChange: (e) => setTitleInput(e.target.value),
-      onBlur: () => {
-        setSessionTitle(titleInput);
-        setEditingTitle(false);
-      },
-      onKeyDown: (e) => {
-        if (e.key === "Enter") {
-          setSessionTitle(titleInput);
-          setEditingTitle(false);
-        }
-      },
-      style: { fontSize: 20, fontWeight: 700, color: "#fff", background: "transparent", border: "none", borderBottom: "2px solid #555", outline: "none", width: "100%", paddingBottom: 2, fontFamily: "inherit" }
-    }
-  ) : /* @__PURE__ */ React.createElement("div", { onClick: () => {
-    setTitleInput(sessionTitle);
-    setEditingTitle(true);
-  }, style: { fontSize: 20, fontWeight: 700, cursor: "text", display: "flex", alignItems: "center", gap: 8 } }, sessionTitle, " ", /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: "#555" } }, "\u270F\uFE0F")), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10, display: "flex", gap: 16 } }, PRICE_TIERS.map((t) => /* @__PURE__ */ React.createElement("div", { key: t.hours, style: { fontSize: 12, color: "#666" } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#f0c040", fontWeight: 700 } }, t.hours, "hr"), /* @__PURE__ */ React.createElement("span", { style: { marginLeft: 4 } }, "$", t.price), t.hours === 4 && /* @__PURE__ */ React.createElement("span", { style: { marginLeft: 4, color: "#f0c040" } }, "\u2605"))))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", background: "#fff", borderBottom: "1px solid #eee" } }, [{ key: "import", label: "\u{1F4CB} \u8CBC\u4E0A\u540D\u55AE" }, { key: "list", label: `\u{1F4B0} \u6536\u5E33\uFF08${members.length}\u4EBA\uFF09` }].map((tab) => /* @__PURE__ */ React.createElement("button", { key: tab.key, onClick: () => setView(tab.key), style: { flex: 1, padding: "14px 0", fontSize: 13, fontWeight: 700, background: "none", border: "none", cursor: "pointer", borderBottom: view === tab.key ? "3px solid #1a1a1a" : "3px solid transparent", color: view === tab.key ? "#1a1a1a" : "#aaa", fontFamily: "inherit" } }, tab.label))), view === "import" && /* @__PURE__ */ React.createElement("div", { style: { padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, lineHeight: 1.6 } }, "\u5C07 Line \u7FA4\u7D44\u7684\u5831\u540D\u540D\u55AE\u76F4\u63A5\u8CBC\u5165\uFF0C\u7A0B\u5F0F\u6703\u81EA\u52D5\u89E3\u6790\u3002\u91CD\u65B0\u8CBC\u5165\u6642\u5DF2\u6536\u6B3E\u8A18\u9304\u4E0D\u6703\u6D88\u5931\u3002", /* @__PURE__ */ React.createElement("br", null), "\u652F\u63F4\u683C\u5F0F\uFF1A", /* @__PURE__ */ React.createElement("span", { style: { color: "#555" } }, "\u6642\u6BB5(C)(\u30FB)(18~20)"), " \u6216 ", /* @__PURE__ */ React.createElement("span", { style: { color: "#555" } }, "\u6642\u6BB5C (18-20)")), /* @__PURE__ */ React.createElement(
+  const tS = { fontSize: 13, border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit", background: "#fff", textAlign: "center" };
+  return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: "#f7f6f3", paddingBottom: 60 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#1a1a1a", color: "#fff", padding: "20px 20px 16px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, letterSpacing: 3, color: "#666", marginBottom: 4 } }, "\u7FBD\u7403\u6536\u5E33\u672C"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 800, marginBottom: 8 } }, session.title), session.slots.filter((s) => s.start && s.end && s.fee).length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, session.slots.filter((s) => s.start && s.end && s.fee).map((s) => /* @__PURE__ */ React.createElement("div", { key: s.id, style: { fontSize: 12, color: "#aaa", background: "#2a2a2a", borderRadius: 20, padding: "4px 10px", display: "flex", gap: 6, alignItems: "center" } }, s.name && /* @__PURE__ */ React.createElement("span", { style: { color: "#fff", fontWeight: 700 } }, s.name), /* @__PURE__ */ React.createElement("span", null, s.start, ":00\u2013", s.end, ":00"), /* @__PURE__ */ React.createElement("span", { style: { color: "#f0c040", fontWeight: 700 } }, "$", s.fee))))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", background: "#fff", borderBottom: "1px solid #eee" } }, [{ key: "basic", label: "\u2699\uFE0F \u57FA\u672C" }, { key: "import", label: "\u{1F4CB} \u540D\u55AE" }, { key: "list", label: `\u{1F4B0} \u6536\u5E33\uFF08${members.length}\u4EBA\uFF09` }].map((tab) => /* @__PURE__ */ React.createElement("button", { key: tab.key, onClick: () => setView(tab.key), style: { flex: 1, padding: "12px 0", fontSize: 11, fontWeight: 700, background: "none", border: "none", cursor: "pointer", borderBottom: view === tab.key ? "3px solid #00897b" : "3px solid transparent", color: view === tab.key ? "#00897b" : "#aaa", fontFamily: "inherit" } }, tab.label))), view === "basic" && /* @__PURE__ */ React.createElement("div", { style: { paddingBottom: 24 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "linear-gradient(160deg,#00897b,#00acc1)", padding: "20px 16px 24px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 3, height: 18, background: "#fff176", borderRadius: 2 } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#fff" } }, "\u6BCF\u9031\u6642\u6BB5\u8A2D\u5B9A")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(255,255,255,0.65)", marginBottom: 16 } }, "\u8A2D\u5B9A\u597D\u5F8C\u9577\u671F\u4FDD\u5B58\uFF0C\u6BCF\u6B21\u958B\u5718\u4E00\u9375\u5E36\u5165\u3002"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" } }, WEEKDAYS.map((day) => {
+    const hasSlots = (weekly[day] || []).length > 0;
+    return /* @__PURE__ */ React.createElement("button", { key: day, onClick: () => setActiveWeekday(day), style: { padding: "6px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: activeWeekday === day ? "2px solid #fff" : "2px solid rgba(255,255,255,0.3)", background: activeWeekday === day ? "#fff" : "rgba(255,255,255,0.15)", color: activeWeekday === day ? "#00897b" : hasSlots ? "#fff176" : "rgba(255,255,255,0.7)", cursor: "pointer", fontFamily: "inherit" } }, day, hasSlots ? " \u2713" : "");
+  })), /* @__PURE__ */ React.createElement("div", { style: { background: "rgba(255,255,255,0.15)", borderRadius: 12, padding: 12 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#fff176", marginBottom: 10, fontWeight: 700 } }, activeWeekday, " \u7684\u6642\u6BB5"), weeklySlots.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "rgba(255,255,255,0.4)", textAlign: "center", padding: "12px 0" } }, "\u5C1A\u672A\u8A2D\u5B9A\uFF0C\u9EDE\u4E0B\u65B9\u65B0\u589E"), weeklySlots.map((slot, idx) => /* @__PURE__ */ React.createElement(SlotCard, { key: slot.id, slot, idx, onUpdate: (f, v) => updateWeeklySlot(slot.id, f, v), onRemove: () => removeWeeklySlot(slot.id) })), /* @__PURE__ */ React.createElement("button", { onClick: addWeeklySlot, style: { width: "100%", padding: "10px 0", background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.8)", border: "2px dashed rgba(255,255,255,0.4)", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\uFF0B \u65B0\u589E", activeWeekday, "\u6642\u6BB5"))), /* @__PURE__ */ React.createElement("div", { style: { padding: "20px 16px 0" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 3, height: 18, background: "#00897b", borderRadius: 2 } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#333" } }, "\u672C\u5834\u8A2D\u5B9A")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 14 } }, "\u9078\u64C7\u4ECA\u5929\u958B\u7684\u5834\u6B21\uFF0C\u4E00\u9375\u5E36\u5165\u6642\u6BB5\u8A2D\u5B9A\u3002"), WEEKDAYS.filter((day) => (weekly[day] || []).length > 0).length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#bbb", marginBottom: 12, background: "#f7f6f3", borderRadius: 10, padding: 14, textAlign: "center" } }, "\u8ACB\u5148\u5728\u4E0A\u65B9\u8A2D\u5B9A\u6BCF\u9031\u6642\u6BB5") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 } }, WEEKDAYS.filter((day) => (weekly[day] || []).length > 0).map((day) => /* @__PURE__ */ React.createElement("button", { key: day, onClick: () => applyWeekday(day), style: { padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 700, background: "#00897b", color: "#fff", border: "none", cursor: "pointer", fontFamily: "inherit", boxShadow: "0 2px 6px rgba(0,137,123,0.3)" } }, day, " \u5E36\u5165"))), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 12 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 6 } }, "\u5834\u6B21\u540D\u7A31"), /* @__PURE__ */ React.createElement("input", { value: session.title, onChange: (e) => setSession((prev) => ({ ...prev, title: e.target.value })), style: { ...iS, width: "100%" } })), session.slots.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8 } }, "\u672C\u5834\u6642\u6BB5\uFF08\u53EF\u5FAE\u8ABF\uFF09"), session.slots.map((slot, idx) => /* @__PURE__ */ React.createElement(SlotCard, { key: slot.id, slot, idx, onUpdate: (f, v) => updateSessionSlot(slot.id, f, v), onRemove: () => removeSessionSlot(slot.id) }))), /* @__PURE__ */ React.createElement("button", { onClick: addSessionSlot, style: { width: "100%", padding: "10px 0", background: "#fff", color: "#555", border: "2px dashed #ddd", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", marginBottom: 16 } }, "\uFF0B \u624B\u52D5\u65B0\u589E\u672C\u5834\u6642\u6BB5"), /* @__PURE__ */ React.createElement("div", { style: { background: "#e0f2f1", border: "1px solid #b2dfdb", borderRadius: 10, padding: 14, fontSize: 12, color: "#555", lineHeight: 1.9, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: "#00695c", marginBottom: 6 } }, "\u{1F4A1} \u8A08\u8CBB\u898F\u5247"), /* @__PURE__ */ React.createElement("div", null, "\u2022 1\u5C0F\u6642\u9AD4\u9A57\u50F9\uFF1A$100"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u52A0\u8CFC\u7B2C3\u5C0F\u6642\uFF1A\u8A72\u6642\u6BB5\u8CBB\u7528 + $90"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u26A0\uFE0F \u8907\u96DC\u60C5\u6CC1\u9700\u624B\u52D5\u78BA\u8A8D")), /* @__PURE__ */ React.createElement("button", { onClick: () => setView("import"), style: { width: "100%", padding: "14px 0", background: "linear-gradient(135deg,#00897b,#00acc1)", color: "#fff", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u8A2D\u5B9A\u5B8C\u6210\uFF0C\u524D\u5F80\u8CBC\u4E0A\u540D\u55AE \u2192"))), view === "import" && /* @__PURE__ */ React.createElement("div", { style: { padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, lineHeight: 1.6 } }, "\u5C07 Line \u7FA4\u7D44\u7684\u5831\u540D\u540D\u55AE\u76F4\u63A5\u8CBC\u5165\uFF0C\u91CD\u65B0\u8CBC\u5165\u6642\u5DF2\u6536\u6B3E\u8A18\u9304\u4E0D\u6703\u6D88\u5931\u3002", /* @__PURE__ */ React.createElement("br", null), "\u652F\u63F4\uFF1A", /* @__PURE__ */ React.createElement("span", { style: { color: "#555" } }, "\u6642\u6BB5D1 (20-22)-$190"), " \u6216 ", /* @__PURE__ */ React.createElement("span", { style: { color: "#555" } }, "\u6642\u6BB5C (18-20)")), /* @__PURE__ */ React.createElement(
     "textarea",
     {
       value: rawText,
       onChange: (e) => setRawText(e.target.value),
-      placeholder: "\u6642\u6BB5(C)(\u30FB)(18~20)\n1. \u{1F338}GMeiMei\u{1F338}\n2. EN(18-21)\n...",
+      placeholder: "\u6642\u6BB5C (18-20)\n1. \u{1F338}GMeiMei\u{1F338}\n2. @\u7403\u53CB\n...",
       style: { width: "100%", height: 260, fontSize: 13, lineHeight: 1.7, border: "1px solid #ddd", borderRadius: 10, padding: 12, outline: "none", resize: "vertical", fontFamily: "inherit", background: "#fff", boxSizing: "border-box" }
     }
-  ), parseError && /* @__PURE__ */ React.createElement("div", { style: { color: "#c62828", fontSize: 13, marginTop: 8 } }, "\u26A0\uFE0F ", parseError), /* @__PURE__ */ React.createElement("button", { onClick: handleImport, style: { marginTop: 12, width: "100%", padding: "14px 0", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u81EA\u52D5\u89E3\u6790\u4E26\u5E36\u5165 \u2192"), members.length > 0 && /* @__PURE__ */ React.createElement("button", { onClick: () => setView("list"), style: { marginTop: 8, width: "100%", padding: "12px 0", background: "#fff", color: "#1a1a1a", border: "2px solid #1a1a1a", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u2190 \u56DE\u5230\u6536\u5E33\u5217\u8868"), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 20, background: "#fff", borderRadius: 10, padding: 14, fontSize: 12, color: "#888", lineHeight: 1.8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: "#555", marginBottom: 6 } }, "\u89E3\u6790\u898F\u5247"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u6709\u62EC\u865F\u6642\u9593 \u2192 \u6309\u62EC\u865F\u6642\u6578\uFF08\u5982 EN(18-21) = 3hr\uFF09"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u7121\u62EC\u865F \u2192 \u4EE5\u51FA\u73FE\u7684\u6642\u6BB5\u52A0\u7E3D"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u540C\u6642\u6BB5\u540C\u540D\u5169\u6B21 \u2192 \u8996\u70BA\u5169\u4EBA"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u91CD\u65B0\u8CBC\u5165\u6642\u5DF2\u6536\u6B3E\u8A18\u9304\u4FDD\u7559\uFF0C\u50C5\u66F4\u65B0\u6642\u6578"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u300C\u5F8C\u88DC\u300D\u6A19\u984C\u5FFD\u7565\uFF0C\u5F8C\u88DC\u6210\u54E1\u7167\u6A23\u5E36\u5165"))), view === "list" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", background: "#fff", borderBottom: "1px solid #eee" } }, [{ label: "\u61C9\u6536\u7E3D\u984D", value: `$${stats.total}`, color: "#333" }, { label: "\u5DF2\u6536", value: `$${stats.collected}`, color: "#2e7d32" }, { label: "\u672A\u6536", value: `$${stats.pending}`, color: stats.pending > 0 ? "#c62828" : "#aaa" }].map((s) => /* @__PURE__ */ React.createElement("div", { key: s.label, style: { padding: "14px 0", textAlign: "center", borderRight: "1px solid #eee" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#aaa", marginBottom: 3 } }, s.label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 20, fontWeight: 800, color: s.color } }, s.value)))), members.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, padding: "10px 16px", background: "#fff", borderBottom: "1px solid #eee", flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement(Badge, { label: "\u73FE\u91D1", count: stats.cashCount, color: "#2e7d32", bg: "#e8f5e9" }), /* @__PURE__ */ React.createElement(Badge, { label: "Line Pay", count: stats.lineCount, color: "#0a5c9a", bg: "#e3f2fd" }), /* @__PURE__ */ React.createElement(Badge, { label: "\u672A\u4ED8", count: stats.unpaidCount, color: "#c62828", bg: "#ffebee" })), /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 16px", background: "#fff", marginTop: 10, borderBottom: "1px solid #eee" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8, letterSpacing: 1 } }, "\u624B\u52D5\u65B0\u589E / \u4FEE\u6539"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\u59D3\u540D / \u66B1\u7A31", value: nameInput, onChange: (e) => setNameInput(e.target.value), onKeyDown: (e) => e.key === "Enter" && addMember(), style: { ...iS, flex: 1 } }), /* @__PURE__ */ React.createElement("button", { onClick: addMember, style: { background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit" } }, "\uFF0B \u52A0\u5165")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa", whiteSpace: "nowrap" } }, "\u5728\u5834\u6642\u9593"), /* @__PURE__ */ React.createElement("input", { type: "number", placeholder: "\u958B\u59CB", value: manualStart, onChange: (e) => setManualStart(e.target.value), style: timeInputS }), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement("input", { type: "number", placeholder: "\u7D50\u675F", value: manualEnd, onChange: (e) => setManualEnd(e.target.value), style: timeInputS }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642"), manualStart && manualEnd && parseInt(manualEnd) > parseInt(manualStart) && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#f0c040", fontWeight: 700 } }, "= ", parseInt(manualEnd) - parseInt(manualStart), "hr $", getPrice(Math.max(1, Math.min(4, parseInt(manualEnd) - parseInt(manualStart)))))), !(manualStart && manualEnd && parseInt(manualEnd) > parseInt(manualStart)) && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, PRICE_TIERS.map((t) => /* @__PURE__ */ React.createElement("button", { key: t.hours, onClick: () => setSelectedHours(t.hours), style: { flex: 1, padding: "7px 0", borderRadius: 8, border: selectedHours === t.hours ? "2px solid #1a1a1a" : "2px solid #e0e0e0", background: selectedHours === t.hours ? "#1a1a1a" : "#fafafa", color: selectedHours === t.hours ? "#fff" : "#666", fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, t.hours, "hr\xB7$", t.price)))), /* @__PURE__ */ React.createElement("div", { style: { padding: "10px 16px" } }, members.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "48px 0", color: "#bbb", fontSize: 14 } }, "\u5C1A\u672A\u6709\u6210\u54E1", /* @__PURE__ */ React.createElement("br", null), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, "\u8ACB\u5148\u5230\u300C\u8CBC\u4E0A\u540D\u55AE\u300D\u9801\u9762\u532F\u5165")) : members.map((m, i) => {
-    const amount = getPrice(m.hours);
+  ), parseError && /* @__PURE__ */ React.createElement("div", { style: { color: "#c62828", fontSize: 13, marginTop: 8 } }, "\u26A0\uFE0F ", parseError), /* @__PURE__ */ React.createElement("button", { onClick: handleImport, style: { marginTop: 12, width: "100%", padding: "14px 0", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 10, fontSize: 15, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u81EA\u52D5\u89E3\u6790\u4E26\u5E36\u5165 \u2192"), members.length > 0 && /* @__PURE__ */ React.createElement("button", { onClick: () => setView("list"), style: { marginTop: 8, width: "100%", padding: "12px 0", background: "#fff", color: "#1a1a1a", border: "2px solid #1a1a1a", borderRadius: 10, fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u2190 \u56DE\u5230\u6536\u5E33\u5217\u8868"), /* @__PURE__ */ React.createElement("div", { style: { marginTop: 16, background: "#fff", borderRadius: 10, padding: 14, fontSize: 12, color: "#888", lineHeight: 1.8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: "#555", marginBottom: 6 } }, "\u89E3\u6790\u898F\u5247"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u6709\u62EC\u865F\u6642\u9593 \u2192 \u6309\u62EC\u865F\u6642\u6578\u8A08\u7B97"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u7121\u62EC\u865F \u2192 \u4EE5\u51FA\u73FE\u7684\u6642\u6BB5\u52A0\u7E3D"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u540C\u4E00\u683C\u591A\u4EBA\uFF08\u5404\u6709\u62EC\u865F\u6642\u9593\uFF09\u2192 \u5206\u5225\u8A08\u7B97"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u540C\u6642\u6BB5\u540C\u540D\u5169\u6B21 \u2192 \u8996\u70BA\u5169\u4EBA"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u540D\u55AE\u6A19\u982D\u7684\u8CBB\u7528\u81EA\u52D5\u5FFD\u7565\uFF0C\u4EE5\u5834\u6B21\u8A2D\u5B9A\u70BA\u6E96"), /* @__PURE__ */ React.createElement("div", null, "\u2022 \u91CD\u65B0\u8CBC\u5165\u6642\u5DF2\u6536\u6B3E\u8A18\u9304\u4FDD\u7559"))), view === "list" && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", background: "#fff", borderBottom: "1px solid #eee" } }, [{ label: "\u61C9\u6536\u7E3D\u984D", value: `$${stats.total}`, color: "#333" }, { label: "\u5DF2\u6536", value: `$${stats.collected}`, color: "#00897b" }, { label: "\u672A\u6536", value: `$${stats.pending}`, color: stats.pending > 0 ? "#c62828" : "#aaa" }].map((s) => /* @__PURE__ */ React.createElement("div", { key: s.label, style: { padding: "14px 0", textAlign: "center", borderRight: "1px solid #eee" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#aaa", marginBottom: 3 } }, s.label), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 20, fontWeight: 800, color: s.color } }, s.value)))), stats.warningCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { background: "#fff8e1", padding: "10px 16px", fontSize: 13, color: "#f57f17", borderBottom: "1px solid #ffe082" } }, "\u26A0\uFE0F \u6709 ", stats.warningCount, " \u4F4D\u7403\u53CB\u9700\u624B\u52D5\u78BA\u8A8D\u8CBB\u7528"), members.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, padding: "10px 16px", background: "#fff", borderBottom: "1px solid #eee", flexWrap: "wrap" } }, /* @__PURE__ */ React.createElement(Badge, { label: "\u73FE\u91D1", count: stats.cashCount, color: "#2e7d32", bg: "#e8f5e9" }), /* @__PURE__ */ React.createElement(Badge, { label: "Line Pay", count: stats.lineCount, color: "#0a5c9a", bg: "#e3f2fd" }), /* @__PURE__ */ React.createElement(Badge, { label: "\u672A\u4ED8", count: stats.unpaidCount, color: "#c62828", bg: "#ffebee" })), /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 16px", background: "#fff", marginTop: 10, borderBottom: "1px solid #eee" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#aaa", marginBottom: 8 } }, "\u624B\u52D5\u65B0\u589E / \u4FEE\u6539"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\u59D3\u540D / \u66B1\u7A31", value: nameInput, onChange: (e) => setNameInput(e.target.value), onKeyDown: (e) => e.key === "Enter" && addMember(), style: { ...iS, flex: 1 } }), /* @__PURE__ */ React.createElement("button", { onClick: addMember, style: { background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "10px 14px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\uFF0B")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa", whiteSpace: "nowrap" } }, "\u5728\u5834\u6642\u9593"), /* @__PURE__ */ React.createElement("input", { type: "number", min: "0", max: "24", placeholder: "\u958B\u59CB", value: manualStart, onChange: (e) => setManualStart(e.target.value), style: { ...tS, width: 56 } }), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement("input", { type: "number", min: "0", max: "24", placeholder: "\u7D50\u675F", value: manualEnd, onChange: (e) => setManualEnd(e.target.value), style: { ...tS, width: 56 } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642")), !(manualStart && manualEnd && parseInt(manualEnd) > parseInt(manualStart)) && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, [1, 2, 3, 4].map((h) => /* @__PURE__ */ React.createElement("button", { key: h, onClick: () => setSelectedHours(h), style: { flex: 1, padding: "7px 0", borderRadius: 8, border: selectedHours === h ? "2px solid #1a1a1a" : "2px solid #e0e0e0", background: selectedHours === h ? "#1a1a1a" : "#fafafa", color: selectedHours === h ? "#fff" : "#666", fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "inherit" } }, h, "hr"))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#555", whiteSpace: "nowrap", fontWeight: 700 } }, "\u91D1\u984D $"), /* @__PURE__ */ React.createElement(
+    "input",
+    {
+      type: "number",
+      min: "0",
+      placeholder: "\u5FC5\u586B",
+      value: manualPrice,
+      onChange: (e) => setManualPrice(e.target.value),
+      style: { ...iS, flex: 1, fontSize: 13, border: manualPrice === "" ? "1px solid #ffcdd2" : "1px solid #ddd" }
+    }
+  ))), /* @__PURE__ */ React.createElement("div", { style: { padding: "10px 16px" } }, members.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: "48px 0", color: "#bbb", fontSize: 14 } }, "\u5C1A\u672A\u6709\u6210\u54E1", /* @__PURE__ */ React.createElement("br", null), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12 } }, "\u8ACB\u5148\u5230\u300C\u540D\u55AE\u300D\u9801\u9762\u532F\u5165")) : members.map((m, i) => {
+    const { price, warning } = getMemberPrice(m);
     const ms = METHOD_STYLE[m.method];
-    const hasTime = m.startHour != null && m.endHour != null;
-    return /* @__PURE__ */ React.createElement("div", { key: m.id, style: { background: "#fff", border: `1px solid ${m.method !== "\u672A\u6536" ? ms.border : "#eee"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 24, height: 24, borderRadius: "50%", background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#999", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontWeight: 700, fontSize: 15 } }, m.name), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#333" } }, "$", amount), /* @__PURE__ */ React.createElement("button", { onClick: () => cycleMethod(m.id), style: { background: ms.bg, color: ms.color, border: `1.5px solid ${ms.border}`, borderRadius: 20, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit" } }, m.method === "\u672A\u6536" ? "\u672A\u6536 \u2192" : m.method), /* @__PURE__ */ React.createElement("button", { onClick: () => removeMember(m.id), style: { background: "none", border: "none", color: "#ccc", fontSize: 18, cursor: "pointer", padding: "0", lineHeight: 1 } }, "\xD7")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, PRICE_TIERS.map((t) => /* @__PURE__ */ React.createElement("button", { key: t.hours, onClick: () => updateHours(m.id, t.hours), style: { flex: 1, padding: "3px 0", borderRadius: 16, fontSize: 11, fontWeight: 700, border: m.hours === t.hours && !pendingTime[m.id] ? "1.5px solid #1a1a1a" : "1.5px solid #ddd", background: m.hours === t.hours && !pendingTime[m.id] ? "#1a1a1a" : "#f5f5f5", color: m.hours === t.hours && !pendingTime[m.id] ? "#fff" : "#aaa", cursor: "pointer", fontFamily: "inherit" } }, t.hours, "hr")), !pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4, marginLeft: 4 } }, /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        type: "number",
-        value: m.startHour ?? "",
-        onChange: (e) => updateTime(m.id, "startHour", e.target.value),
-        placeholder: "\u958B\u59CB",
-        style: { width: 46, fontSize: 11, textAlign: "center", border: "1px solid #ddd", borderRadius: 6, padding: "3px 2px", outline: "none", fontFamily: "inherit" }
-      }
-    ), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, color: "#bbb" } }, "\u2014"), /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        type: "number",
-        value: m.endHour ?? "",
-        onChange: (e) => updateTime(m.id, "endHour", e.target.value),
-        placeholder: "\u7D50\u675F",
-        style: { width: 46, fontSize: 11, textAlign: "center", border: "1px solid #ddd", borderRadius: 6, padding: "3px 2px", outline: "none", fontFamily: "inherit" }
-      }
-    ))), pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10, background: "#f7f6f3", borderRadius: 10, padding: "12px", border: "1.5px solid #e0e0e0" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#555", marginBottom: 8, fontWeight: 700 } }, "\u6539\u70BA ", pendingTime[m.id].hours, "hr\uFF0C\u8ACB\u78BA\u8A8D\u5728\u5834\u6642\u9593\uFF1A"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } }, /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        type: "number",
-        placeholder: "\u958B\u59CB",
-        value: pendingTime[m.id].start,
-        onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], start: e.target.value } })),
-        style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" }
-      }
-    ), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement(
-      "input",
-      {
-        type: "number",
-        placeholder: "\u7D50\u675F",
-        value: pendingTime[m.id].end,
-        onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], end: e.target.value } })),
-        style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" }
-      }
-    ), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => cancelTime(m.id), style: { flex: 1, padding: "8px 0", background: "#fff", color: "#888", border: "1.5px solid #ddd", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u53D6\u6D88"), /* @__PURE__ */ React.createElement("button", { onClick: () => confirmTime(m.id), style: { flex: 2, padding: "8px 0", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u78BA\u8A8D"))));
-  })), members.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "#1a1a1a", borderRadius: 12, padding: "16px 20px", color: "#fff" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#555", marginBottom: 10, letterSpacing: 2 } }, "\u672C\u5834\u5C0F\u7D50"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa", fontSize: 14 } }, "\u5171 ", members.length, " \u4EBA"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, "\u61C9\u6536 $", stats.total)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } }, stats.priceBreakdown.map((p) => /* @__PURE__ */ React.createElement("div", { key: p.hours, style: { background: "#2a2a2a", borderRadius: 8, padding: "5px 10px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#f0c040", fontWeight: 700 } }, "$", p.price), /* @__PURE__ */ React.createElement("span", { style: { color: "#666", margin: "0 3px" } }, "\xD7"), /* @__PURE__ */ React.createElement("span", { style: { color: "#fff", fontWeight: 700 } }, p.count, " \u4EBA")))), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid #2a2a2a", marginBottom: 8 } }), stats.cashCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontSize: 14 } }, "\u{1F4B5} \u73FE\u91D1\uFF08", stats.cashCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontWeight: 700 } }, "$", stats.cashTotal)), stats.lineCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#64b5f6", fontSize: 14 } }, "\u{1F4F1} Line Pay\uFF08", stats.lineCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#64b5f6", fontWeight: 700 } }, "$", stats.lineTotal)), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid #2a2a2a", marginTop: 4, paddingTop: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontSize: 14 } }, "\u2713 \u5DF2\u6536\u5408\u8A08"), /* @__PURE__ */ React.createElement("span", { style: { color: "#81c784", fontWeight: 700 } }, "$", stats.collected)), stats.pending > 0 ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#ef9a9a", fontSize: 14 } }, "\u23F3 \u5F85\u6536\uFF08", stats.unpaidCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#ef9a9a", fontWeight: 700 } }, "$", stats.pending)) : /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#81c784", fontWeight: 700 } }, "\u2705 \u5168\u90E8\u6536\u6B3E\u5B8C\u6210\uFF01"))), stats.hourStats.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "#fff", borderRadius: 12, padding: "16px 20px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#aaa", marginBottom: 12, letterSpacing: 2 } }, "\u6BCF\u5C0F\u6642\u5728\u5834\u4EBA\u6578"), stats.hourStats.map(({ hour, count }) => {
+    return /* @__PURE__ */ React.createElement("div", { key: m.id, style: { background: "#fff", border: `1px solid ${m.method !== "\u672A\u6536" ? ms.border : warning ? "#ffe082" : "#eee"}`, borderRadius: 12, padding: "12px 14px", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 24, height: 24, borderRadius: "50%", background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#999", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontWeight: 700, fontSize: 15 } }, m.name), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4 } }, warning && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, color: "#f57f17" } }, "\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: m.manualPrice != null && m.manualPrice !== -1 ? "#9c27b0" : "#333" } }, "$", m.manualPrice != null && m.manualPrice !== -1 ? m.manualPrice : price)), /* @__PURE__ */ React.createElement("button", { onClick: () => cycleMethod(m.id), style: { background: ms.bg, color: ms.color, border: `1.5px solid ${ms.border}`, borderRadius: 20, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", fontFamily: "inherit" } }, m.method === "\u672A\u6536" ? "\u672A\u6536 \u2192" : m.method), /* @__PURE__ */ React.createElement("button", { onClick: () => removeMember(m.id), style: { background: "none", border: "none", color: "#ccc", fontSize: 18, cursor: "pointer", padding: 0, lineHeight: 1 } }, "\xD7")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, [1, 2, 3, 4].map((h) => /* @__PURE__ */ React.createElement("button", { key: h, onClick: () => updateHours(m.id, h), style: { flex: 1, padding: "3px 0", borderRadius: 16, fontSize: 11, fontWeight: 700, border: m.hours === h && !pendingTime[m.id] ? "1.5px solid #1a1a1a" : "1.5px solid #ddd", background: m.hours === h && !pendingTime[m.id] ? "#1a1a1a" : "#f5f5f5", color: m.hours === h && !pendingTime[m.id] ? "#fff" : "#aaa", cursor: "pointer", fontFamily: "inherit" } }, h, "hr")), !pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 4, marginLeft: 4 } }, /* @__PURE__ */ React.createElement("input", { type: "number", value: m.startHour ?? "", onChange: (e) => updateTime(m.id, "startHour", e.target.value), placeholder: "\u958B", style: { width: 44, fontSize: 11, textAlign: "center", border: "1px solid #ddd", borderRadius: 6, padding: "3px 2px", outline: "none", fontFamily: "inherit" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, color: "#bbb" } }, "\u2014"), /* @__PURE__ */ React.createElement("input", { type: "number", value: m.endHour ?? "", onChange: (e) => updateTime(m.id, "endHour", e.target.value), placeholder: "\u7D50", style: { width: 44, fontSize: 11, textAlign: "center", border: "1px solid #ddd", borderRadius: 6, padding: "3px 2px", outline: "none", fontFamily: "inherit" } }))), warning && !pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 8, display: "flex", alignItems: "center", gap: 8, background: "#fff8e1", borderRadius: 8, padding: "8px 10px" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#f57f17" } }, "\u26A0\uFE0F \u624B\u52D5\u78BA\u8A8D\u8CBB\u7528 $"), /* @__PURE__ */ React.createElement("input", { type: "number", defaultValue: price || "", onBlur: (e) => {
+      const v = parseInt(e.target.value);
+      if (!isNaN(v)) setMembers((prev) => prev.map((mm) => mm.id !== m.id ? mm : { ...mm, manualPrice: v }));
+    }, style: { width: 70, fontSize: 13, textAlign: "center", border: "1px solid #ffe082", borderRadius: 6, padding: "4px", outline: "none", fontFamily: "inherit" } })), pendingTime[m.id] && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10, background: "#f7f6f3", borderRadius: 10, padding: "12px", border: "1.5px solid #e0e0e0" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#555", marginBottom: 8, fontWeight: 700 } }, "\u6539\u70BA ", pendingTime[m.id].hours, "hr\uFF0C\u8ACB\u78BA\u8A8D\u5728\u5834\u6642\u9593\uFF1A"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("input", { type: "number", placeholder: "\u958B\u59CB", value: pendingTime[m.id].start, onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], start: e.target.value } })), style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" } }), /* @__PURE__ */ React.createElement("span", { style: { color: "#aaa" } }, "\u2014"), /* @__PURE__ */ React.createElement("input", { type: "number", placeholder: "\u7D50\u675F", value: pendingTime[m.id].end, onChange: (e) => setPendingTime((prev) => ({ ...prev, [m.id]: { ...prev[m.id], end: e.target.value } })), style: { flex: 1, fontSize: 13, textAlign: "center", border: "1px solid #ddd", borderRadius: 8, padding: "8px 4px", outline: "none", fontFamily: "inherit" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, color: "#aaa" } }, "\u6642")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => cancelTime(m.id), style: { flex: 1, padding: "8px 0", background: "#fff", color: "#888", border: "1.5px solid #ddd", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u53D6\u6D88"), /* @__PURE__ */ React.createElement("button", { onClick: () => confirmTime(m.id), style: { flex: 2, padding: "8px 0", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u78BA\u8A8D"))));
+  })), members.length > 0 && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "linear-gradient(135deg,#00897b,#00796b)", borderRadius: 12, padding: "16px 20px", color: "#fff" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.4)", marginBottom: 10, letterSpacing: 2 } }, "\u672C\u5834\u5C0F\u7D50"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "rgba(255,255,255,0.7)", fontSize: 14 } }, "\u5171 ", members.length, " \u4EBA"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, "\u61C9\u6536 $", stats.total)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 } }, stats.priceBreakdown.map((p) => /* @__PURE__ */ React.createElement("div", { key: p.price, style: { background: "rgba(255,255,255,0.15)", borderRadius: 8, padding: "5px 10px", fontSize: 12 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#fff176", fontWeight: 700 } }, "$", p.price), /* @__PURE__ */ React.createElement("span", { style: { color: "rgba(255,255,255,0.5)", margin: "0 3px" } }, "\xD7"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, p.count, " \u4EBA")))), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,0.2)", marginBottom: 8 } }), stats.cashCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#b2dfdb", fontSize: 14 } }, "\u{1F4B5} \u73FE\u91D1\uFF08", stats.cashCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#b2dfdb", fontWeight: 700 } }, "$", stats.cashTotal)), stats.lineCount > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#b3e5fc", fontSize: 14 } }, "\u{1F4F1} Line Pay\uFF08", stats.lineCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#b3e5fc", fontWeight: 700 } }, "$", stats.lineTotal)), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px solid rgba(255,255,255,0.2)", paddingTop: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#b2dfdb", fontSize: 14 } }, "\u2713 \u5DF2\u6536\u5408\u8A08"), /* @__PURE__ */ React.createElement("span", { style: { color: "#b2dfdb", fontWeight: 700 } }, "$", stats.collected)), stats.pending > 0 ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between" } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#ffcdd2", fontSize: 14 } }, "\u23F3 \u5F85\u6536\uFF08", stats.unpaidCount, " \u4EBA\uFF09"), /* @__PURE__ */ React.createElement("span", { style: { color: "#ffcdd2", fontWeight: 700 } }, "$", stats.pending)) : /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#b2dfdb", fontWeight: 700 } }, "\u2705 \u5168\u90E8\u6536\u6B3E\u5B8C\u6210\uFF01"))), stats.hourStats.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 10px", background: "#fff", borderRadius: 12, padding: "16px 20px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#aaa", marginBottom: 12, letterSpacing: 2 } }, "\u6BCF\u5C0F\u6642\u5728\u5834\u4EBA\u6578"), stats.hourStats.map(({ hour, count }) => {
     const maxC = Math.max(...stats.hourStats.map((h) => h.count));
-    return /* @__PURE__ */ React.createElement("div", { key: hour, style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: "#555", fontWeight: 700 } }, hour, ":00 \u2013 ", hour + 1, ":00"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "#1a1a1a" } }, count, " \u4EBA")), /* @__PURE__ */ React.createElement("div", { style: { background: "#f0f0f0", borderRadius: 4, height: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: `${Math.round(count / maxC * 100)}%`, height: "100%", background: "#1a1a1a", borderRadius: 4 } })));
+    return /* @__PURE__ */ React.createElement("div", { key: hour, style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, color: "#555", fontWeight: 700 } }, hour, ":00\u2013", hour + 1, ":00"), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 800 } }, count, " \u4EBA")), /* @__PURE__ */ React.createElement("div", { style: { background: "#f0f0f0", borderRadius: 4, height: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { width: `${Math.round(count / maxC * 100)}%`, height: "100%", background: "#00897b", borderRadius: 4 } })));
   })), /* @__PURE__ */ React.createElement("div", { style: { margin: "0 16px 20px" } }, /* @__PURE__ */ React.createElement("button", { onClick: clearAll, style: { width: "100%", padding: "12px 0", background: "#fff", color: "#c62828", border: "1.5px solid #ffcdd2", borderRadius: 10, fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "\u{1F5D1} \u6E05\u7A7A\u672C\u5834\uFF0C\u958B\u59CB\u65B0\u5834\u6B21")))));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
